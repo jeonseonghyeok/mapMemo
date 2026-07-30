@@ -80,15 +80,19 @@
 
 ## 7. 개발 순서 (MVP 로드맵)
 
-1. Supabase 프로젝트 생성 + schema.sql 실행 (기본 카테고리 4종 시드 포함)
-2. 공공데이터포털 화장실 API 연동 → official 데이터 채우기
-3. Next.js + 카카오맵으로 지도 마커 표시 (읽기 전용, official만 노출)
-4. Supabase Auth 로그인/회원가입
-5. 개인 등록 기능 (spaces, category_id 선택 포함, 본인만 조회되는 상태로 저장)
-6. "공식 등록 신청" 버튼 + submissions 심사 큐 (관리자 승인 시에만 official로 신규 생성)
-7. 월별 등록 한도 체크 + 안내 UI (문구는 "출처 무관, 무료 한도 초과" 기준으로 작성)
-8. Export/Import 기능
-9. PWA 설정 → 추후 Capacitor로 앱스토어 전환 검토
+> 상태 표시: ✅ 완료 · ⚠️ 부분 완료(확인/설정 필요) · ⬜ 미착수
+
+1. ✅ Supabase 프로젝트 생성 + schema.sql 실행 (기본 카테고리 4종 시드 포함)
+2. ⚠️ 공공데이터포털 화장실 API 연동 → official 데이터 채우기
+   — 관리자 화면(`/admin/submissions`)에 가져오기 버튼과 적재 로직(`src/lib/publicData/toilets.ts`, `/api/admin/import-toilets`)은 구현됨.
+   실제 데이터셋 URL·서비스키(`DATA_GO_KR_SERVICE_KEY`/`DATA_GO_KR_TOILET_API_URL`)가 아직 없고, 필드 매핑도 흔한 후보명으로 추정만 해둔 상태라 실제 응답으로 검증 필요
+3. ✅ Next.js + 카카오맵으로 지도 마커 표시 (읽기 전용, official만 노출) — `/`, `src/components/KakaoMap.tsx`
+4. ⚠️ Supabase Auth 로그인/회원가입 — 이메일/비밀번호(`/login`)만 구현. 카카오 소셜로그인은 Supabase Provider 설정이 추가로 필요해 미구현(5장 참고)
+5. ✅ 개인 등록 기능 — `/spaces/new` (카테고리 선택 + 지도 클릭으로 좌표 지정, 본인만 조회)
+6. ✅ "공식 등록 신청" 버튼 + submissions 심사 큐 — `/spaces`에서 신청, `/admin/submissions`에서 관리자 승인/반려
+7. ✅ 월별 등록 한도 체크 + 안내 UI — 등록/가져오기 시 사전 체크 후 차단(`src/lib/usage.ts`)
+8. ✅ Export/Import 기능 — `/spaces` 페이지, `/api/spaces/export`·`/api/spaces/import`
+9. ✅ PWA 설정 (`public/manifest.json` + `public/sw.js`, 최소 오프라인 캐싱) → Capacitor 전환은 아직 미착수
 
 ## 8. 참고 - 스키마 파일
 
