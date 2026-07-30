@@ -9,6 +9,8 @@ declare global {
   namespace kakao.maps {
     class LatLng {
       constructor(lat: number, lng: number);
+      getLat(): number;
+      getLng(): number;
     }
 
     class Map {
@@ -18,8 +20,15 @@ declare global {
     }
 
     class Marker {
-      constructor(options: { position: LatLng; map?: Map; title?: string });
+      constructor(options: {
+        position: LatLng;
+        map?: Map;
+        title?: string;
+        draggable?: boolean;
+      });
       setMap(map: Map | null): void;
+      setPosition(latlng: LatLng): void;
+      getPosition(): LatLng;
     }
 
     class InfoWindow {
@@ -28,11 +37,15 @@ declare global {
       close(): void;
     }
 
+    interface MouseEvent {
+      latLng: LatLng;
+    }
+
     namespace event {
       function addListener(
         target: Marker | Map,
         type: string,
-        handler: () => void,
+        handler: (event: MouseEvent) => void,
       ): void;
     }
 

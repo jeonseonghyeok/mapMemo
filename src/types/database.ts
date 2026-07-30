@@ -29,6 +29,26 @@ export type Space = {
   updated_at: string;
 };
 
+export type Submission = {
+  id: string;
+  space_id: string;
+  submitted_by: string;
+  status: "pending" | "approved" | "rejected";
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  admin_note: string | null;
+  created_at: string;
+};
+
+export type MonthlyRegistrationUsage = {
+  id: string;
+  user_id: string;
+  month: string;
+  registration_count: number;
+  plan_tier: "free" | "basic" | "pro";
+  limit_count: number;
+};
+
 export type Database = {
   public: {
     Tables: {
@@ -36,11 +56,53 @@ export type Database = {
         Row: Category;
         Insert: Partial<Category> & Pick<Category, "name">;
         Update: Partial<Category>;
+        Relationships: [];
       };
       spaces: {
         Row: Space;
         Insert: Partial<Space> & Pick<Space, "category_id" | "location">;
         Update: Partial<Space>;
+        Relationships: [
+          {
+            foreignKeyName: "spaces_category_id_fkey";
+            columns: ["category_id"];
+            isOneToOne: false;
+            referencedRelation: "categories";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      submissions: {
+        Row: Submission;
+        Insert: Partial<Submission> & Pick<Submission, "space_id" | "submitted_by">;
+        Update: Partial<Submission>;
+        Relationships: [
+          {
+            foreignKeyName: "submissions_space_id_fkey";
+            columns: ["space_id"];
+            isOneToOne: false;
+            referencedRelation: "spaces";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      monthly_registration_usage: {
+        Row: MonthlyRegistrationUsage;
+        Insert: Partial<MonthlyRegistrationUsage> &
+          Pick<MonthlyRegistrationUsage, "user_id" | "month">;
+        Update: Partial<MonthlyRegistrationUsage>;
+        Relationships: [];
+      };
+    };
+    Views: Record<string, never>;
+    Functions: {
+      submit_for_review: {
+        Args: { target_space_id: string };
+        Returns: string;
+      };
+      approve_submission: {
+        Args: { submission_id: string; admin_id: string };
+        Returns: undefined;
       };
     };
   };

@@ -13,9 +13,17 @@ export default async function Home() {
       <header className="flex items-center justify-between border-b border-black/10 px-4 py-3 dark:border-white/10">
         <h1 className="text-lg font-semibold">mapMemo</h1>
         {user ? (
-          <span className="text-sm text-black/60 dark:text-white/60">
-            {user.email}
-          </span>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/spaces"
+              className="text-sm text-black/60 dark:text-white/60"
+            >
+              내 공간
+            </Link>
+            <span className="text-sm text-black/60 dark:text-white/60">
+              {user.email}
+            </span>
+          </div>
         ) : (
           <Link
             href="/login"

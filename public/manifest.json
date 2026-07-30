@@ -1,0 +1,17 @@
+{
+  "name": "mapMemo",
+  "short_name": "mapMemo",
+  "description": "지도 기반 공간 정보 관리 앱",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#171717",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
