@@ -8,7 +8,6 @@ type CreateSpaceInput = {
   categoryId: string;
   lat: number;
   lng: number;
-  address?: string;
   name?: string;
   description?: string;
 };
@@ -32,7 +31,7 @@ export async function createSpace(input: CreateSpaceInput) {
 
   const { error } = await supabase.from("spaces").insert({
     category_id: input.categoryId,
-    location: { lat: input.lat, lng: input.lng, address: input.address },
+    location: { lat: input.lat, lng: input.lng },
     managed_by: "personal",
     owner_id: user.id,
     details: {
@@ -46,7 +45,38 @@ export async function createSpace(input: CreateSpaceInput) {
   }
 
   revalidatePath("/spaces");
+  revalidatePath("/");
   return { error: null };
+}
+
+// 카테고리는 고정 목록이 아니라 사용자가 자유롭게 새로 만들 수 있다 (PLANNING.md 3.1)
+export async function createCategory(name: string) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return { error: "로그인이 필요합니다.", category: null };
+  }
+
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return { error: "카테고리 이름을 입력해주세요.", category: null };
+  }
+
+  const { data, error } = await supabase
+    .from("categories")
+    .insert({ name: trimmed, created_by: user.id })
+    .select()
+    .single();
+
+  if (error) {
+    return { error: `카테고리 생성에 실패했습니다: ${error.message}`, category: null };
+  }
+
+  revalidatePath("/");
+  return { error: null, category: data };
 }
 
 export async function submitForReview(spaceId: string) {

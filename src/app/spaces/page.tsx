@@ -49,10 +49,10 @@ export default async function SpacesPage() {
             지도
           </Link>
           <Link
-            href="/spaces/new"
+            href="/"
             className="rounded-md bg-foreground px-3 py-1.5 text-sm font-medium text-background"
           >
-            + 등록
+            + 지도에서 등록
           </Link>
         </div>
       </div>
