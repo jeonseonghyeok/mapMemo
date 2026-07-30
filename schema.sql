@@ -1,29 +1,35 @@
 -- ============================================================
--- 공간정보관리 앱 - Supabase 스키마 (v2)
--- 구성: categories(동적 카테고리+병합+submittable) / spaces(공간 정보, entrance 통합)
+-- 공간정보관리 앱 - Supabase 스키마 (v3)
+-- 구성: categories(동적 카테고리+병합) / spaces(공간 정보)
 --       submissions(공식 등록 심사 큐) / monthly_registration_usage(과금)
 --
+-- v3 변경사항:
+-- - entrance(공동현관) 카테고리 및 관련 로직 완전 제거
+--   → 카테고리 이름은 사용자가 자유롭게 바꿀 수 있어(3.1), submittable=false로
+--     특정 카테고리 하나를 하드 락하는 방식은 이름 변경 한 번으로 무의미해짐.
+--     신뢰할 수 없는 보호장치이므로 entrance 자체를 서비스 범위에서 제거.
+-- - categories.submittable 컬럼 제거 (entrance 락 전용이었던 필드, 더 이상 쓰임새 없음)
+-- - spaces.access_code 컬럼 제거 (entrance류 카테고리 전용이었던 필드)
+--
 -- v2 변경사항:
--- - entrances 별도 테이블 제거 → spaces로 통합 (categories.submittable로 구분)
+-- - entrances 별도 테이블 제거 → spaces로 통합
 -- - spaces.visibility 컬럼 제거 → 개인 데이터는 영구 비공개, 공개는 오직 심사(submissions) 통과 시에만
--- - access_code를 spaces의 공통 컬럼으로 이동 (암호화 저장, entrance류 카테고리에서만 사용)
 -- ============================================================
 
 -- 필요한 확장 활성화
-create extension if not exists pgcrypto;   -- access_code 암호화용
+create extension if not exists pgcrypto;   -- uuid 생성용
 create extension if not exists postgis;    -- 좌표 기반 검색/클러스터링 대비 (선택)
 
 
 -- ============================================================
--- 1. categories : 동적으로 생성 가능한 카테고리 + 병합 이력 + 공개 가능 여부
+-- 1. categories : 동적으로 생성 가능한 카테고리 + 병합 이력
 -- ============================================================
 create table categories (
   id            uuid primary key default gen_random_uuid(),
-  name          text not null,                 -- 예: "부천 화장실", "화장실", "공동현관"
+  name          text not null,                 -- 예: "부천 화장실", "화장실"
   created_by    uuid references auth.users(id),-- null이면 사이트 기본 제공 카테고리
   canonical_id  uuid references categories(id),-- 병합된 경우 최종 카테고리 id
   status        text not null default 'active' check (status in ('active','merged')),
-  submittable   boolean not null default true,  -- 관리자 심사로도 공개 승격 불가한 카테고리는 false
   created_at    timestamptz not null default now()
 );
 
@@ -59,20 +65,18 @@ create view categories_resolved as
 select
   c.id,
   c.name,
-  c.submittable,
   resolve_canonical(c.id) as effective_id
 from categories c;
 
-insert into categories (name, created_by, submittable) values
-  ('화장실', null, true),
-  ('스터디룸', null, true),
-  ('화상면접실', null, true),
-  ('배드민턴장', null, true),
-  ('공동현관', null, false);
+insert into categories (name, created_by) values
+  ('화장실', null),
+  ('스터디룸', null),
+  ('화상면접실', null),
+  ('배드민턴장', null);
 
 
 -- ============================================================
--- 2. spaces : 모든 공간 정보 통합 테이블 (화장실/스터디룸/배드민턴장/공동현관 등)
+-- 2. spaces : 모든 공간 정보 통합 테이블 (화장실/스터디룸/배드민턴장 등)
 -- ============================================================
 create table spaces (
   id               uuid primary key default gen_random_uuid(),
@@ -82,7 +86,6 @@ create table spaces (
   owner_id         uuid references auth.users(id),
   details          jsonb not null default '{}',
   recurring_groups jsonb not null default '[]',
-  access_code      text,
   verified         boolean not null default false,
   deleted_at       timestamptz,
   created_at       timestamptz not null default now(),
@@ -124,18 +127,8 @@ create index idx_submissions_status on submissions(status);
 create or replace function submit_for_review(target_space_id uuid)
 returns uuid as $$
 declare
-  cat_submittable boolean;
   new_submission_id uuid;
 begin
-  select c.submittable into cat_submittable
-  from spaces s
-  join categories c on c.id = s.category_id
-  where s.id = target_space_id;
-
-  if cat_submittable is distinct from true then
-    raise exception '이 카테고리는 공식 등록 신청이 불가능합니다 (submittable=false)';
-  end if;
-
   insert into submissions (space_id, submitted_by, status)
   values (target_space_id, auth.uid(), 'pending')
   returning id into new_submission_id;
@@ -246,8 +239,6 @@ for select using (user_id = auth.uid());
 -- ============================================================
 -- - 등록 요청 시 monthly_registration_usage 조회 후 limit_count 초과 여부를
 --   먼저 확인하고, 초과 시 결제 유도 응답을 반환 (DB 트리거로 강제 차단 X)
--- - spaces.access_code 는 애플리케이션에서 암호화 후 저장
--- - export(내보내기) 시 access_code는 암호화된 상태 그대로 포함
 -- - import(복원) 시 원본 id/owner_id/created_at을 그대로 유지해야
 --   위 과금 로직이 "복원은 무료"로 정상 동작함
 -- - approve_submission()은 관리자 전용 RPC이므로, service_role 키를 쓰는

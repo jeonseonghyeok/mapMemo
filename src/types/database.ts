@@ -12,7 +12,6 @@ export type Category = {
   created_by: string | null;
   canonical_id: string | null;
   status: "active" | "merged";
-  submittable: boolean;
   created_at: string;
 };
 
@@ -24,7 +23,6 @@ export type Space = {
   owner_id: string | null;
   details: Record<string, unknown>;
   recurring_groups: unknown[];
-  access_code: string | null;
   verified: boolean;
   deleted_at: string | null;
   created_at: string;
