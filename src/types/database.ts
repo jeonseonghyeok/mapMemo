@@ -24,6 +24,7 @@ export type Space = {
   details: Record<string, unknown>;
   recurring_groups: unknown[];
   verified: boolean;
+  shared: boolean;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -47,6 +48,24 @@ export type MonthlyRegistrationUsage = {
   registration_count: number;
   plan_tier: "free" | "basic" | "pro";
   limit_count: number;
+};
+
+export type Profile = {
+  id: string;
+  nickname: string;
+  created_at: string;
+};
+
+export type Report = {
+  id: string;
+  space_id: string;
+  reported_by: string;
+  reason: string;
+  status: "pending" | "resolved";
+  resolved_by: string | null;
+  resolved_at: string | null;
+  admin_note: string | null;
+  created_at: string;
 };
 
 export type Database = {
@@ -92,6 +111,26 @@ export type Database = {
           Pick<MonthlyRegistrationUsage, "user_id" | "month">;
         Update: Partial<MonthlyRegistrationUsage>;
         Relationships: [];
+      };
+      profiles: {
+        Row: Profile;
+        Insert: Partial<Profile> & Pick<Profile, "id" | "nickname">;
+        Update: Partial<Profile>;
+        Relationships: [];
+      };
+      reports: {
+        Row: Report;
+        Insert: Partial<Report> & Pick<Report, "space_id" | "reported_by" | "reason">;
+        Update: Partial<Report>;
+        Relationships: [
+          {
+            foreignKeyName: "reports_space_id_fkey";
+            columns: ["space_id"];
+            isOneToOne: false;
+            referencedRelation: "spaces";
+            referencedColumns: ["id"];
+          },
+        ];
       };
     };
     Views: Record<string, never>;

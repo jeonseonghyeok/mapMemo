@@ -5,17 +5,27 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { loadKakaoSdk } from "@/lib/kakao";
 import RegisterSpaceModal from "@/components/RegisterSpaceModal";
+import { reportSpace } from "@/app/spaces/actions";
 import type { Category, Space } from "@/types/database";
+
+declare global {
+  interface Window {
+    __mapmemoReport?: (spaceId: string) => void;
+  }
+}
 
 const DEFAULT_CENTER = { lat: 37.5665, lng: 126.978 }; // 서울시청
 const FILTER_STORAGE_KEY = "mapmemo:groupFilter";
 
-type SpaceRow = Pick<Space, "id" | "category_id" | "location" | "managed_by" | "details"> & {
+type SpaceRow = Pick<
+  Space,
+  "id" | "category_id" | "location" | "managed_by" | "details" | "owner_id"
+> & {
   categories: { name: string } | null;
 };
 
-// "그룹" = 카테고리 x 소유 범위(공식/내 등록) 조합. 같은 카테고리라도
-// 공식 데이터와 내가 등록한 개인 데이터를 별도 태그로 켜고 끌 수 있게 한다.
+// "그룹" = 카테고리 x 소유 범위(공식/내 등록/타인의 공유) 조합. PLANNING.md 3.3에 따라
+// 타인이 공유한 그룹은 "{닉네임}_{카테고리명}" 형식으로 표시한다.
 type Group = {
   key: string;
   label: string;
@@ -25,8 +35,22 @@ type Group = {
 // 마커 등록 흐름: idle(평소) → placing(위치 클릭 대기) → placed(위치 지정됨, 모달 열기 가능)
 type PlacementMode = "idle" | "placing" | "placed";
 
-function groupKey(managedBy: "official" | "personal", categoryId: string) {
-  return `${managedBy}:${categoryId}`;
+function groupKey(space: SpaceRow, currentUserId: string | null): string {
+  if (space.managed_by === "official") return `official:${space.category_id}`;
+  if (space.owner_id === currentUserId) return `mine:${space.category_id}`;
+  return `user:${space.owner_id}:${space.category_id}`;
+}
+
+function groupLabel(
+  space: SpaceRow,
+  currentUserId: string | null,
+  nicknames: Map<string, string>,
+): string {
+  const categoryName = space.categories?.name ?? "이름 없는 카테고리";
+  if (space.managed_by === "official") return `${categoryName} · 공식`;
+  if (space.owner_id === currentUserId) return `${categoryName} · 내 등록`;
+  const nickname = (space.owner_id && nicknames.get(space.owner_id)) || "알 수 없음";
+  return `${nickname}_${categoryName}`;
 }
 
 // 재접속 시 이전 필터 상태 복원 — 렌더 중 동기적으로 읽어 lazy init에 사용
@@ -53,6 +77,7 @@ export default function KakaoMap() {
   const [spaces, setSpaces] = useState<SpaceRow[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
+  const [ownerNicknames, setOwnerNicknames] = useState<Map<string, string>>(new Map());
   // null = 사용자가 아직 명시적으로 선택한 적 없음 → effectiveSelectedKeys에서 "전체 선택"으로 대체
   const [selectedKeys, setSelectedKeys] = useState<Set<string> | null>(readStoredKeys);
   const [search, setSearch] = useState("");
@@ -67,20 +92,49 @@ export default function KakaoMap() {
     setMode(next);
   }
 
+  // 카카오 InfoWindow는 React 트리 밖의 순수 HTML이라, 신고 버튼 클릭을 전역 콜백으로 연결한다
+  useEffect(() => {
+    window.__mapmemoReport = async (spaceId: string) => {
+      const reason = window.prompt("신고 사유를 입력해주세요.");
+      if (!reason || !reason.trim()) return;
+      const result = await reportSpace(spaceId, reason);
+      window.alert(result.error ?? "신고가 접수되었습니다. 검토 후 조치됩니다.");
+    };
+    return () => {
+      delete window.__mapmemoReport;
+    };
+  }, []);
+
   const loadSpaces = useCallback(async () => {
     const supabase = createClient();
     // managed_by 필터를 걸지 않아도 RLS(spaces_read)가
-    // "official 전체 + 내가 owner인 personal"만 돌려준다.
+    // "official 전체 + 내가 owner인 personal + 로그인 사용자에게 공유된(shared=true) personal"을
+    // 알아서 걸러서 돌려준다.
     const { data, error: fetchError } = await supabase
       .from("spaces")
-      .select("id, category_id, location, managed_by, details, categories(name)")
+      .select("id, category_id, location, managed_by, details, owner_id, categories(name)")
       .is("deleted_at", null);
 
     if (fetchError) {
       setError(`데이터 조회 실패: ${fetchError.message}`);
       return;
     }
-    setSpaces((data ?? []) as unknown as SpaceRow[]);
+    const rows = (data ?? []) as unknown as SpaceRow[];
+    setSpaces(rows);
+
+    // 타인이 공유한 그룹은 "{닉네임}_{카테고리명}"으로 표시해야 하므로(3.3) owner의 닉네임을 조회
+    const ownerIds = Array.from(
+      new Set(rows.map((r) => r.owner_id).filter((id): id is string => !!id)),
+    );
+    if (ownerIds.length === 0) {
+      setOwnerNicknames(new Map());
+      return;
+    }
+    const { data: profileRows } = await supabase
+      .from("profiles")
+      .select("id, nickname")
+      .in("id", ownerIds);
+    setOwnerNicknames(new Map((profileRows ?? []).map((p) => [p.id, p.nickname])));
   }, []);
 
   const loadCategories = useCallback(async () => {
@@ -195,18 +249,17 @@ export default function KakaoMap() {
   const groups = useMemo<Group[]>(() => {
     const map = new Map<string, Group>();
     for (const space of spaces) {
-      const key = groupKey(space.managed_by, space.category_id);
+      const key = groupKey(space, userId);
       if (!map.has(key)) {
-        const categoryName = space.categories?.name ?? "이름 없는 카테고리";
         map.set(key, {
           key,
-          label: `${categoryName} · ${space.managed_by === "official" ? "공식" : "내 등록"}`,
+          label: groupLabel(space, userId, ownerNicknames),
           managedBy: space.managed_by,
         });
       }
     }
     return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, "ko"));
-  }, [spaces]);
+  }, [spaces, userId, ownerNicknames]);
 
   // 사용자가 아직 필터를 건드리지 않았다면(=선택값이 없다면) 기본값은 "전체 선택"
   const effectiveSelectedKeys = useMemo(
@@ -231,7 +284,7 @@ export default function KakaoMap() {
     const infoWindow = new window.kakao.maps.InfoWindow({ content: "" });
 
     for (const space of spaces) {
-      const key = groupKey(space.managed_by, space.category_id);
+      const key = groupKey(space, userId);
       if (!effectiveSelectedKeys.has(key)) continue;
       if (
         typeof space.location?.lat !== "number" ||
@@ -252,15 +305,21 @@ export default function KakaoMap() {
         space.categories?.name ??
         (space.managed_by === "official" ? "공식 공간" : "내 공간");
 
+      // 타인이 공유한 개인 데이터에만 신고 버튼을 붙인다 (공식·내 데이터는 신고 대상 아님)
+      const isOthersShared = space.managed_by === "personal" && space.owner_id !== userId;
+      const reportButton = isOthersShared
+        ? `<button onclick="window.__mapmemoReport && window.__mapmemoReport('${space.id}')" style="margin-left:8px;font-size:11px;color:#dc2626;border:none;background:none;cursor:pointer;text-decoration:underline;">신고</button>`
+        : "";
+
       window.kakao.maps.event.addListener(marker, "click", () => {
         infoWindow.close();
         const win = new window.kakao.maps.InfoWindow({
-          content: `<div style="padding:6px 10px;font-size:13px;">${name}</div>`,
+          content: `<div style="padding:6px 10px;font-size:13px;">${name}${reportButton}</div>`,
         });
         win.open(map, marker);
       });
     }
-  }, [spaces, effectiveSelectedKeys]);
+  }, [spaces, effectiveSelectedKeys, userId]);
 
   function toggleGroup(key: string) {
     setSelectedKeys((prev) => {

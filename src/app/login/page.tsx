@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { checkNicknameAvailable } from "./actions";
 
 type Mode = "sign-in" | "sign-up";
 
@@ -11,19 +12,40 @@ export default function LoginPage() {
   const [mode, setMode] = useState<Mode>("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [nickname, setNickname] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setLoading(true);
+
+    if (mode === "sign-up") {
+      const trimmed = nickname.trim();
+      if (!trimmed) {
+        setError("닉네임을 입력해주세요.");
+        return;
+      }
+      setLoading(true);
+      const available = await checkNicknameAvailable(trimmed);
+      if (!available) {
+        setLoading(false);
+        setError("이미 사용 중인 닉네임입니다.");
+        return;
+      }
+    } else {
+      setLoading(true);
+    }
 
     const supabase = createClient();
     const { error } =
       mode === "sign-in"
         ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
+        : await supabase.auth.signUp({
+            email,
+            password,
+            options: { data: { nickname: nickname.trim() } },
+          });
 
     setLoading(false);
 
@@ -72,6 +94,20 @@ export default function LoginPage() {
             placeholder="6자 이상"
           />
         </label>
+
+        {mode === "sign-up" && (
+          <label className="flex flex-col gap-1 text-sm">
+            닉네임
+            <input
+              type="text"
+              required
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              className="rounded-md border border-black/10 px-3 py-2 outline-none focus:border-black/30 dark:border-white/15 dark:focus:border-white/30"
+              placeholder="다른 사용자에게 보여질 이름"
+            />
+          </label>
+        )}
 
         {error && <p className="text-sm text-red-600">{error}</p>}
 

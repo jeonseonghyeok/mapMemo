@@ -23,6 +23,7 @@ export default function RegisterSpaceModal({
   const [newCategoryName, setNewCategoryName] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [shared, setShared] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -62,6 +63,7 @@ export default function RegisterSpaceModal({
       lng: position.lng,
       name: name || undefined,
       description: description || undefined,
+      shared,
     });
     setSubmitting(false);
 
@@ -138,6 +140,16 @@ export default function RegisterSpaceModal({
               rows={3}
               className="rounded-md border border-black/10 px-3 py-2 outline-none dark:border-white/15"
             />
+          </label>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={shared}
+              onChange={(e) => setShared(e.target.checked)}
+              className="h-4 w-4"
+            />
+            다른 사용자에게 공유하기 (검색·팔로우 대상이 됩니다)
           </label>
 
           {error && <p className="text-sm text-red-600">{error}</p>}
