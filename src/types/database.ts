@@ -68,6 +68,16 @@ export type Report = {
   created_at: string;
 };
 
+export type SpaceInvite = {
+  id: string;
+  space_id: string;
+  owner_id: string;
+  token: string;
+  expires_at: string;
+  revoked_at: string | null;
+  created_at: string;
+};
+
 export type Database = {
   public: {
     Tables: {
@@ -125,6 +135,21 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "reports_space_id_fkey";
+            columns: ["space_id"];
+            isOneToOne: false;
+            referencedRelation: "spaces";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      space_invites: {
+        Row: SpaceInvite;
+        Insert: Partial<SpaceInvite> &
+          Pick<SpaceInvite, "space_id" | "owner_id" | "token" | "expires_at">;
+        Update: Partial<SpaceInvite>;
+        Relationships: [
+          {
+            foreignKeyName: "space_invites_space_id_fkey";
             columns: ["space_id"];
             isOneToOne: false;
             referencedRelation: "spaces";

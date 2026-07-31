@@ -1,9 +1,12 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { checkMonthlyLimit } from "@/lib/usage";
 import { findSensitivePatterns } from "@/lib/contentFilter";
+
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7일
 
 type CreateSpaceInput = {
   categoryId: string;
@@ -173,4 +176,46 @@ export async function reportSpace(spaceId: string, reason: string) {
   }
 
   return { error: null };
+}
+
+// 지인에게 명시적으로 특정 space를 공유하는 초대 링크 생성 (PLANNING.md 8.3)
+// shared=false인 비공개 데이터도 이 링크로는 예외적으로 열람 가능 — 승인 없이 열리는
+// 3.5의 커뮤니티 공유와 달리, 소유자가 특정 대상에게만 콕 집어 보여주는 별개 경로
+export async function createInvite(spaceId: string) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return { error: "로그인이 필요합니다.", token: null };
+  }
+
+  // 본인 소유 space인지 먼저 확인 — space_invites.owner_id는 자기 자신을 자유롭게
+  // 채울 수 있으므로, 여기서 확인 안 하면 타인의 space_id로도 초대를 만들 수 있게 됨
+  const { data: space } = await supabase
+    .from("spaces")
+    .select("id")
+    .eq("id", spaceId)
+    .eq("owner_id", user.id)
+    .maybeSingle();
+
+  if (!space) {
+    return { error: "본인 소유의 공간만 초대 링크를 만들 수 있습니다.", token: null };
+  }
+
+  const token = randomUUID().replace(/-/g, "");
+
+  const { error } = await supabase.from("space_invites").insert({
+    space_id: spaceId,
+    owner_id: user.id,
+    token,
+    expires_at: new Date(Date.now() + INVITE_TTL_MS).toISOString(),
+  });
+
+  if (error) {
+    return { error: `초대 링크 생성에 실패했습니다: ${error.message}`, token: null };
+  }
+
+  return { error: null, token };
 }

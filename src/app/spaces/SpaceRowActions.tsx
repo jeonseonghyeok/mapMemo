@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { deleteSpace, restoreSpace, submitForReview } from "./actions";
+import { deleteSpace, restoreSpace, submitForReview, createInvite } from "./actions";
 
 type Props = {
   spaceId: string;
@@ -22,6 +22,25 @@ export default function SpaceRowActions({
     startTransition(async () => {
       const result = await action();
       if (result.error) setError(result.error);
+    });
+  }
+
+  // PLANNING.md 8.3 — 지인에게 명시적으로 공유하는 초대 링크 생성
+  function handleInvite() {
+    setError(null);
+    startTransition(async () => {
+      const result = await createInvite(spaceId);
+      if (result.error || !result.token) {
+        setError(result.error ?? "초대 링크 생성에 실패했습니다.");
+        return;
+      }
+      const url = `${window.location.origin}/i/${result.token}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        window.alert(`공유 링크가 복사되었습니다 (7일간 유효):\n${url}`);
+      } catch {
+        window.prompt("아래 링크를 복사하세요 (7일간 유효):", url);
+      }
     });
   }
 
@@ -67,6 +86,13 @@ export default function SpaceRowActions({
             반려됨 · 재신청
           </button>
         )}
+        <button
+          disabled={pending}
+          onClick={handleInvite}
+          className="text-sm text-blue-600 underline disabled:opacity-50"
+        >
+          초대 링크
+        </button>
         <button
           disabled={pending}
           onClick={() => run(() => deleteSpace(spaceId))}
