@@ -13,10 +13,16 @@ declare global {
       getLng(): number;
     }
 
+    class LatLngBounds {
+      getSouthWest(): LatLng;
+      getNorthEast(): LatLng;
+    }
+
     class Map {
       constructor(container: HTMLElement, options: { center: LatLng; level?: number });
       setCenter(latlng: LatLng): void;
       panTo(latlng: LatLng): void;
+      getBounds(): LatLngBounds;
     }
 
     class Marker {
