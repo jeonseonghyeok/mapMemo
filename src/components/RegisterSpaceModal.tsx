@@ -13,6 +13,54 @@ type Props = {
 
 const NEW_CATEGORY_VALUE = "__new__";
 
+// 별 하나당 왼쪽 절반/오른쪽 절반을 각각 클릭해 0.5 단위로 평가를 매길 수 있게 한다.
+// 실제 별 아이콘을 두 겹(회색 배경 + 채워진 색을 fillPercent%만큼 잘라 보여주는 레이어)으로
+// 그려서 절반만 채워진 별도 표현한다.
+function StarRating({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number | null;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className={`flex gap-1 ${disabled ? "opacity-30" : ""}`}>
+      {[1, 2, 3, 4, 5].map((n) => {
+        const fillPercent = value == null ? 0 : value >= n ? 100 : value >= n - 0.5 ? 50 : 0;
+        return (
+          <div key={n} className="relative h-7 w-7 text-2xl leading-none">
+            <span className="absolute inset-0 text-black/15 dark:text-white/20">★</span>
+            <span
+              className="absolute inset-0 overflow-hidden text-red-500"
+              style={{ width: `${fillPercent}%` }}
+            >
+              ★
+            </span>
+            {!disabled && (
+              <>
+                <button
+                  type="button"
+                  aria-label={`${n - 0.5}점`}
+                  onClick={() => onChange(n - 0.5)}
+                  className="absolute inset-y-0 left-0 w-1/2"
+                />
+                <button
+                  type="button"
+                  aria-label={`${n}점`}
+                  onClick={() => onChange(n)}
+                  className="absolute inset-y-0 right-0 w-1/2"
+                />
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function RegisterSpaceModal({
   position,
   categories,
@@ -23,6 +71,8 @@ export default function RegisterSpaceModal({
   const [newCategoryName, setNewCategoryName] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [rating, setRating] = useState<number | null>(null);
+  const [skipRating, setSkipRating] = useState(true);
   const [shared, setShared] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -63,6 +113,7 @@ export default function RegisterSpaceModal({
       lng: position.lng,
       name: name || undefined,
       description: description || undefined,
+      rating: skipRating || rating == null ? undefined : rating,
       shared,
     });
     setSubmitting(false);
@@ -76,7 +127,9 @@ export default function RegisterSpaceModal({
   }
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 px-4">
+    // z-index를 사이드바 패널(z-50)/토글 탭(z-60)보다 높게 둬서, 태블릿·데스크탑처럼
+    // 사이드바가 기본으로 열려 있는 상태에서 등록 모달을 열어도 가려지지 않게 한다
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-4">
       <div className="w-full max-w-sm rounded-lg bg-background p-5 shadow-lg">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-semibold">마커 등록</h2>
@@ -141,6 +194,22 @@ export default function RegisterSpaceModal({
               className="rounded-md border border-black/10 px-3 py-2 outline-none dark:border-white/15"
             />
           </label>
+
+          <div className="flex flex-col gap-1 text-sm">
+            <div className="flex items-center justify-between">
+              <span>평가 (선택)</span>
+              <label className="flex items-center gap-1 text-xs text-black/50 dark:text-white/50">
+                <input
+                  type="checkbox"
+                  checked={skipRating}
+                  onChange={(e) => setSkipRating(e.target.checked)}
+                  className="h-3.5 w-3.5"
+                />
+                선택안함
+              </label>
+            </div>
+            <StarRating value={rating} onChange={setRating} disabled={skipRating} />
+          </div>
 
           <label className="flex items-center gap-2 text-sm">
             <input

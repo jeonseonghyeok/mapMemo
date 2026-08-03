@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { loadKakaoSdk } from "@/lib/kakao";
 import RegisterSpaceModal from "@/components/RegisterSpaceModal";
-import FollowSidebar from "@/components/FollowSidebar";
+import FollowSidebar, { type GroupSection } from "@/components/FollowSidebar";
 import { reportSpace } from "@/app/spaces/actions";
 import type { Category, Space } from "@/types/database";
 
@@ -16,8 +16,7 @@ declare global {
 }
 
 const DEFAULT_CENTER = { lat: 37.5665, lng: 126.978 }; // 서울시청
-const OWNER_FILTER_STORAGE_KEY = "mapmemo:filterOwnerScopes";
-const CATEGORY_FILTER_STORAGE_KEY = "mapmemo:filterCategories";
+const UNCHECKED_GROUPS_STORAGE_KEY = "mapmemo:uncheckedGroups";
 // PLANNING.md 8.1 — 롱프레스 판정 기준
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_CANCEL_PX = 10;
@@ -29,13 +28,6 @@ type SpaceRow = Pick<
   categories: { name: string } | null;
 };
 
-// "그룹"을 소유 범위(공식/내 등록/타인의 공유)와 카테고리, 두 개의 독립된 facet으로 분해해
-// 탭으로 나눠 고르고 선택 결과를 칩으로 모아 보여준다 (PLANNING.md 8.2 재설계).
-type FilterOption = {
-  key: string;
-  label: string;
-};
-
 type LongPressMenu = {
   screenX: number;
   screenY: number;
@@ -43,22 +35,29 @@ type LongPressMenu = {
   lng: number;
 };
 
-type FilterTab = "owner" | "category";
-
-function ownerScopeKey(space: SpaceRow, currentUserId: string | null): string {
-  if (space.managed_by === "official") return "official";
-  if (space.owner_id === currentUserId) return "mine";
-  return `user:${space.owner_id}`;
+// 그룹 키 포맷: "official:<categoryId>" | "mine:<categoryId>" | "follow:<ownerId>:<categoryId>"
+// 사이드바는 이 키 하나로 상위 그룹(공식/내 마커/팔로우한 타인 마커) 소속과 조회 조건을
+// 동시에 표현한다 — 체크 시 이 키만으로 어떤 조건으로 spaces를 조회할지 결정할 수 있다.
+function parseGroupKey(key: string): { kind: "official" | "mine" | "follow"; categoryId: string; ownerId?: string } {
+  const [kind, a, b] = key.split(":");
+  if (kind === "follow") return { kind: "follow", ownerId: a, categoryId: b };
+  return { kind: kind as "official" | "mine", categoryId: a };
 }
 
-function ownerScopeLabel(
-  space: SpaceRow,
-  currentUserId: string | null,
-  nicknames: Map<string, string>,
-): string {
-  if (space.managed_by === "official") return "공식";
-  if (space.owner_id === currentUserId) return "내 등록";
-  return (space.owner_id && nicknames.get(space.owner_id)) || "알 수 없음";
+function dedupeByCategory(
+  rows: { category_id: string; categories: { name: string } | null }[] | null | undefined,
+  kind: "official" | "mine",
+): GroupSection["items"] {
+  const map = new Map<string, GroupSection["items"][number]>();
+  for (const row of rows ?? []) {
+    if (!map.has(row.category_id)) {
+      map.set(row.category_id, {
+        key: `${kind}:${row.category_id}`,
+        label: row.categories?.name ?? "이름 없는 카테고리",
+      });
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, "ko"));
 }
 
 // 화면 픽셀 좌표 → 위경도. 롱프레스/우클릭은 아직 손을 떼지 않은 시점(=카카오맵 자체의
@@ -83,15 +82,14 @@ function pixelToLatLng(
   return new window.kakao.maps.LatLng(lat, lng);
 }
 
-// 재접속 시 이전 필터 상태 복원 — 렌더 중 동기적으로 읽어 lazy init에 사용
-// (이펙트에서 setState하면 불필요한 리렌더가 한 번 더 발생하므로 지양)
-function readStoredSet(key: string): Set<string> | null {
-  if (typeof window === "undefined") return null;
+// 재접속 시 이전 체크 해제 상태 복원 — 렌더 중 동기적으로 읽어 lazy init에 사용
+function readStoredSet(key: string): Set<string> {
+  if (typeof window === "undefined") return new Set();
   try {
     const raw = localStorage.getItem(key);
-    return raw ? new Set(JSON.parse(raw) as string[]) : null;
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
   } catch {
-    return null;
+    return new Set();
   }
 }
 
@@ -105,20 +103,24 @@ export default function KakaoMap() {
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [spaces, setSpaces] = useState<SpaceRow[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
-  const [ownerNicknames, setOwnerNicknames] = useState<Map<string, string>>(new Map());
-  // null = 사용자가 아직 명시적으로 선택한 적 없음 → effective 값에서 "전체 선택"으로 대체
-  const [selectedOwnerScopes, setSelectedOwnerScopes] = useState<Set<string> | null>(() =>
-    readStoredSet(OWNER_FILTER_STORAGE_KEY),
+  // 사이드바 트리 뼈대(공식 데이터/내 마커/팔로우한 타인 마커) — 위치/상세 정보 없이
+  // "어떤 그룹이 존재하는지"만 담는다. 실제 마커 데이터는 체크 시 groupCache로 지연 로딩된다.
+  const [groupSections, setGroupSections] = useState<GroupSection[]>([]);
+  const [groupCache, setGroupCache] = useState<Map<string, SpaceRow[]>>(new Map());
+  // 그룹 목록은 동적으로 늘어나므로(새 카테고리/새 팔로우) "포함 목록"이 아니라 "제외 목록"을
+  // 저장한다 — 저장 시점에 없던 새 그룹도 자동으로 기본 체크(표시)되게 하기 위함
+  const [uncheckedGroups, setUncheckedGroups] = useState<Set<string>>(() =>
+    readStoredSet(UNCHECKED_GROUPS_STORAGE_KEY),
   );
-  const [selectedCategories, setSelectedCategories] = useState<Set<string> | null>(() =>
-    readStoredSet(CATEGORY_FILTER_STORAGE_KEY),
-  );
-  const [activeTab, setActiveTab] = useState<FilterTab>("owner");
-  const [search, setSearch] = useState("");
+  // 데스크탑(md 이상)에서는 사이드바가 기본으로 열려 있도록 한다. 서버 렌더링과 클라이언트
+  // 최초 렌더링이 항상 같은 값(false)이어야 hydration mismatch가 안 나므로, 초기값은
+  // false로 고정하고 마운트 후 effect에서 media query를 확인해 보정한다
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  useEffect(() => {
+    if (window.matchMedia("(min-width: 768px)").matches) setSidebarOpen(true);
+  }, []);
   const [longPressMenu, setLongPressMenu] = useState<LongPressMenu | null>(null);
   const [pendingPosition, setPendingPosition] = useState<{ lat: number; lng: number } | null>(
     null,
@@ -144,36 +146,66 @@ export default function KakaoMap() {
     };
   }, []);
 
-  const loadSpaces = useCallback(async () => {
+  // 사이드바 트리 뼈대만 다시 조회(위치/상세 정보는 가져오지 않음 — 가벼움)
+  const loadGroupSections = useCallback(async (uid: string | null) => {
     const supabase = createClient();
-    // managed_by 필터를 걸지 않아도 RLS(spaces_read)가
-    // "official 전체 + 내가 owner인 personal + 로그인 사용자에게 공유된(shared=true) personal"을
-    // 알아서 걸러서 돌려준다.
-    const { data, error: fetchError } = await supabase
+
+    const { data: officialRows } = await supabase
       .from("spaces")
-      .select("id, category_id, location, managed_by, details, owner_id, categories(name)")
+      .select("category_id, categories(name)")
+      .eq("managed_by", "official")
       .is("deleted_at", null);
-
-    if (fetchError) {
-      setError(`데이터 조회 실패: ${fetchError.message}`);
-      return;
-    }
-    const rows = (data ?? []) as unknown as SpaceRow[];
-    setSpaces(rows);
-
-    // 타인이 공유한 소유 범위는 닉네임으로 표시해야 하므로(3.3) owner의 닉네임을 조회
-    const ownerIds = Array.from(
-      new Set(rows.map((r) => r.owner_id).filter((id): id is string => !!id)),
+    const officialItems = dedupeByCategory(
+      officialRows as unknown as { category_id: string; categories: { name: string } | null }[],
+      "official",
     );
-    if (ownerIds.length === 0) {
-      setOwnerNicknames(new Map());
-      return;
+
+    let mineItems: GroupSection["items"] = [];
+    if (uid) {
+      const { data: mineRows } = await supabase
+        .from("spaces")
+        .select("category_id, categories(name)")
+        .eq("owner_id", uid)
+        .is("deleted_at", null);
+      mineItems = dedupeByCategory(
+        mineRows as unknown as { category_id: string; categories: { name: string } | null }[],
+        "mine",
+      );
     }
-    const { data: profileRows } = await supabase
-      .from("profiles")
-      .select("id, nickname")
-      .in("id", ownerIds);
-    setOwnerNicknames(new Map((profileRows ?? []).map((p) => [p.id, p.nickname])));
+
+    let followItems: GroupSection["items"] = [];
+    if (uid) {
+      const { data: followRows } = await supabase
+        .from("follows")
+        .select("owner_id, category_id, categories(name)")
+        .eq("follower_id", uid);
+      const rows = (followRows ?? []) as unknown as {
+        owner_id: string;
+        category_id: string;
+        categories: { name: string } | null;
+      }[];
+      const ownerIds = Array.from(new Set(rows.map((r) => r.owner_id)));
+      let nicknames = new Map<string, string>();
+      if (ownerIds.length > 0) {
+        const { data: profileRows } = await supabase
+          .from("profiles")
+          .select("id, nickname")
+          .in("id", ownerIds);
+        nicknames = new Map((profileRows ?? []).map((p) => [p.id, p.nickname]));
+      }
+      followItems = rows
+        .map((r) => ({
+          key: `follow:${r.owner_id}:${r.category_id}`,
+          label: `${nicknames.get(r.owner_id) ?? "알 수 없음"}_${r.categories?.name ?? "이름 없는 카테고리"}`,
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label, "ko"));
+    }
+
+    setGroupSections([
+      { kind: "official", title: "공식 데이터", items: officialItems },
+      { kind: "mine", title: "내 마커", items: mineItems },
+      { kind: "follow", title: "팔로우한 타인 마커", items: followItems },
+    ]);
   }, []);
 
   const loadCategories = useCallback(async () => {
@@ -185,6 +217,97 @@ export default function KakaoMap() {
       .order("name");
     setCategories(data ?? []);
   }, []);
+
+  // 그룹 키 하나로 해당 그룹의 마커 데이터만 조회 — RLS(spaces_read)가 shared=true 등
+  // 나머지 조건을 알아서 걸러준다
+  const fetchGroupSpaces = useCallback(async (key: string): Promise<SpaceRow[]> => {
+    const supabase = createClient();
+    const parsed = parseGroupKey(key);
+    let query = supabase
+      .from("spaces")
+      .select("id, category_id, location, managed_by, details, owner_id, categories(name)")
+      .eq("category_id", parsed.categoryId)
+      .is("deleted_at", null);
+
+    if (parsed.kind === "official") {
+      query = query.eq("managed_by", "official");
+    } else if (parsed.kind === "mine") {
+      query = query.eq("owner_id", userIdRef.current ?? "");
+    } else {
+      query = query.eq("owner_id", parsed.ownerId ?? "");
+    }
+
+    const { data, error: fetchError } = await query;
+    if (fetchError) {
+      setError(`데이터 조회 실패: ${fetchError.message}`);
+      return [];
+    }
+    return (data ?? []) as unknown as SpaceRow[];
+  }, []);
+
+  // 그룹 목록(groupSections)이 갱신될 때마다, 체크된(uncheckedGroups에 없는) 그룹 중 아직
+  // 캐시에 없는 것만 새로 조회한다 — 최초 로드 시 기본 체크된 그룹 전부, 이후엔 신규 그룹만
+  useEffect(() => {
+    const allItems = groupSections.flatMap((s) => s.items);
+    const toFetch = allItems.filter(
+      (item) => !uncheckedGroups.has(item.key) && !groupCache.has(item.key),
+    );
+    if (toFetch.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(
+        toFetch.map(async (item) => [item.key, await fetchGroupSpaces(item.key)] as const),
+      );
+      if (cancelled) return;
+      setGroupCache((prev) => {
+        const next = new Map(prev);
+        for (const [key, rows] of entries) next.set(key, rows);
+        return next;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupSections]);
+
+  useEffect(() => {
+    localStorage.setItem(UNCHECKED_GROUPS_STORAGE_KEY, JSON.stringify(Array.from(uncheckedGroups)));
+  }, [uncheckedGroups]);
+
+  // 체크 해제는 서버 통신 없이 클라이언트에서만 숨김. 체크는 캐시에 없을 때만 조회(재사용
+  // 우선) — 상위 그룹의 "전체 선택/전체 취소"도 이 함수 하나로 여러 키를 한 번에 처리한다
+  async function setGroupsChecked(keys: string[], checked: boolean) {
+    if (checked) {
+      setUncheckedGroups((prev) => {
+        const next = new Set(prev);
+        for (const key of keys) next.delete(key);
+        return next;
+      });
+      const missing = keys.filter((key) => !groupCache.has(key));
+      if (missing.length === 0) return;
+      const entries = await Promise.all(
+        missing.map(async (key) => [key, await fetchGroupSpaces(key)] as const),
+      );
+      setGroupCache((prev) => {
+        const next = new Map(prev);
+        for (const [key, rows] of entries) next.set(key, rows);
+        return next;
+      });
+    } else {
+      setUncheckedGroups((prev) => {
+        const next = new Set(prev);
+        for (const key of keys) next.add(key);
+        return next;
+      });
+    }
+  }
+
+  function toggleGroupChecked(key: string) {
+    setGroupsChecked([key], uncheckedGroups.has(key));
+  }
 
   function closeLongPressMenu() {
     setLongPressMenu(null);
@@ -199,7 +322,16 @@ export default function KakaoMap() {
   async function handleCreated() {
     setModalOpen(false);
     setPendingPosition(null);
-    await Promise.all([loadSpaces(), loadCategories()]);
+    // "내 마커" 버킷은 캐시를 통째로 비워, 그룹 목록 재조회 후 이어지는 effect가
+    // (기존 카테고리든 새 카테고리든) 다시 채우게 한다
+    setGroupCache((prev) => {
+      const next = new Map(prev);
+      for (const key of next.keys()) {
+        if (key.startsWith("mine:")) next.delete(key);
+      }
+      return next;
+    });
+    await loadGroupSections(userIdRef.current);
   }
 
   // 롱프레스(500ms, 아직 손을 떼지 않은 시점)와 우클릭 둘 다 이 함수로 귀결된다
@@ -306,7 +438,7 @@ export default function KakaoMap() {
         } = await supabase.auth.getUser();
         if (!cancelled) setUserId(user?.id ?? null);
 
-        await Promise.all([loadSpaces(), loadCategories()]);
+        await Promise.all([loadCategories(), loadGroupSections(user?.id ?? null)]);
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : "지도를 불러오지 못했습니다.");
@@ -323,66 +455,7 @@ export default function KakaoMap() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const ownerScopeOptions = useMemo<FilterOption[]>(() => {
-    const map = new Map<string, FilterOption>();
-    for (const space of spaces) {
-      const key = ownerScopeKey(space, userId);
-      if (!map.has(key)) {
-        map.set(key, { key, label: ownerScopeLabel(space, userId, ownerNicknames) });
-      }
-    }
-    // 공식 → 내 등록 → 나머지(닉네임 가나다) 순으로 정렬
-    return Array.from(map.values()).sort((a, b) => {
-      const rank = (k: string) => (k === "official" ? 0 : k === "mine" ? 1 : 2);
-      const r = rank(a.key) - rank(b.key);
-      return r !== 0 ? r : a.label.localeCompare(b.label, "ko");
-    });
-  }, [spaces, userId, ownerNicknames]);
-
-  const categoryOptions = useMemo<FilterOption[]>(() => {
-    const map = new Map<string, FilterOption>();
-    for (const space of spaces) {
-      if (!map.has(space.category_id)) {
-        map.set(space.category_id, {
-          key: space.category_id,
-          label: space.categories?.name ?? "이름 없는 카테고리",
-        });
-      }
-    }
-    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, "ko"));
-  }, [spaces]);
-
-  // "선택된 게 없으면 전체 표시, 하나라도 고르면 그것만" — null이든 빈 Set이든 똑같이
-  // "아직 좁히지 않음"으로 취급한다. (한 번이라도 골랐다가 마지막 하나까지 지우면 다시
-  // 자동으로 "전체 표시"가 되는 게 오히려 자연스럽다)
-  const effectiveOwnerScopes = useMemo(
-    () =>
-      selectedOwnerScopes && selectedOwnerScopes.size > 0
-        ? selectedOwnerScopes
-        : new Set(ownerScopeOptions.map((o) => o.key)),
-    [selectedOwnerScopes, ownerScopeOptions],
-  );
-  const effectiveCategories = useMemo(
-    () =>
-      selectedCategories && selectedCategories.size > 0
-        ? selectedCategories
-        : new Set(categoryOptions.map((o) => o.key)),
-    [selectedCategories, categoryOptions],
-  );
-
-  useEffect(() => {
-    if (selectedOwnerScopes === null) return;
-    localStorage.setItem(OWNER_FILTER_STORAGE_KEY, JSON.stringify(Array.from(selectedOwnerScopes)));
-  }, [selectedOwnerScopes]);
-  useEffect(() => {
-    if (selectedCategories === null) return;
-    localStorage.setItem(
-      CATEGORY_FILTER_STORAGE_KEY,
-      JSON.stringify(Array.from(selectedCategories)),
-    );
-  }, [selectedCategories]);
-
-  // 마커 다시 그리기
+  // 마커 다시 그리기 — 체크된 그룹의 캐시된 데이터만 사용(서버 재조회 없음)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -390,11 +463,16 @@ export default function KakaoMap() {
     markersRef.current.forEach((m) => m.setMap(null));
     markersRef.current = [];
 
-    const infoWindow = new window.kakao.maps.InfoWindow({ content: "" });
+    // 열려 있는 정보창을 추적해서, 같은 마커를 다시 클릭하면 닫고(토글), 다른 마커를
+    // 클릭하면 이전 정보창을 닫고 새로 연다(한 번에 하나만 표시)
+    let openInfo: { marker: kakao.maps.Marker; win: kakao.maps.InfoWindow } | null = null;
 
-    for (const space of spaces) {
-      if (!effectiveOwnerScopes.has(ownerScopeKey(space, userId))) continue;
-      if (!effectiveCategories.has(space.category_id)) continue;
+    const allItems = groupSections.flatMap((s) => s.items);
+    const visibleSpaces = allItems
+      .filter((item) => !uncheckedGroups.has(item.key))
+      .flatMap((item) => groupCache.get(item.key) ?? []);
+
+    for (const space of visibleSpaces) {
       if (
         typeof space.location?.lat !== "number" ||
         typeof space.location?.lng !== "number"
@@ -409,10 +487,15 @@ export default function KakaoMap() {
       const marker = new window.kakao.maps.Marker({ position, map });
       markersRef.current.push(marker);
 
+      const details = space.details as { name?: string; rating?: number; description?: string } | null;
       const name =
-        (space.details as { name?: string } | null)?.name ??
+        details?.name ??
         space.categories?.name ??
         (space.managed_by === "official" ? "공식 공간" : "내 공간");
+      const description =
+        details?.description && details.description.length > 10
+          ? `${details.description.slice(0, 10)}…`
+          : details?.description;
 
       // 타인이 공유한 개인 데이터에만 신고 버튼을 붙인다 (공식·내 데이터는 신고 대상 아님)
       const isOthersShared = space.managed_by === "personal" && space.owner_id !== userId;
@@ -420,175 +503,40 @@ export default function KakaoMap() {
         ? `<button onclick="window.__mapmemoReport && window.__mapmemoReport('${space.id}')" style="margin-left:8px;font-size:11px;color:#dc2626;border:none;background:none;cursor:pointer;text-decoration:underline;">신고</button>`
         : "";
 
+      const lines = [
+        `<div>${name}${reportButton}</div>`,
+        details?.rating != null ? `<div>★ ${details.rating.toFixed(1)}</div>` : "",
+        description ? `<div>${description}</div>` : "",
+      ]
+        .filter(Boolean)
+        .join("");
+
+      const win = new window.kakao.maps.InfoWindow({
+        content: `<div style="padding:6px 10px;font-size:13px;">${lines}</div>`,
+      });
+
       window.kakao.maps.event.addListener(marker, "click", () => {
-        infoWindow.close();
-        const win = new window.kakao.maps.InfoWindow({
-          content: `<div style="padding:6px 10px;font-size:13px;">${name}${reportButton}</div>`,
-        });
+        if (openInfo?.marker === marker) {
+          // 이미 열려 있는 마커를 다시 클릭 → 닫기(토글)
+          win.close();
+          openInfo = null;
+          return;
+        }
+        openInfo?.win.close();
         win.open(map, marker);
+        openInfo = { marker, win };
       });
     }
-  }, [spaces, effectiveOwnerScopes, effectiveCategories, userId]);
-
-  function toggleOwnerScope(key: string) {
-    setSelectedOwnerScopes((prev) => {
-      const next = new Set(prev ?? []);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
-  function toggleCategory(key: string) {
-    setSelectedCategories((prev) => {
-      const next = new Set(prev ?? []);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
-  function clearFilter() {
-    setSearch("");
-    setSelectedOwnerScopes(null);
-    setSelectedCategories(null);
-    localStorage.removeItem(OWNER_FILTER_STORAGE_KEY);
-    localStorage.removeItem(CATEGORY_FILTER_STORAGE_KEY);
-  }
-
-  const activeOptions = activeTab === "owner" ? ownerScopeOptions : categoryOptions;
-  const visibleOptions = search.trim()
-    ? activeOptions.filter((o) => o.label.toLowerCase().includes(search.trim().toLowerCase()))
-    : activeOptions;
-
-  // 사용자가 명시적으로 좁힌(=null이 아닌) facet만 칩으로 보여준다 — 손대지 않은 facet은
-  // "전체"라 보여줄 칩이 없다
-  const chips: { key: string; label: string; onRemove: () => void }[] = [
-    ...(selectedOwnerScopes
-      ? ownerScopeOptions
-          .filter((o) => selectedOwnerScopes.has(o.key))
-          .map((o) => ({ key: `owner:${o.key}`, label: o.label, onRemove: () => toggleOwnerScope(o.key) }))
-      : []),
-    ...(selectedCategories
-      ? categoryOptions
-          .filter((o) => selectedCategories.has(o.key))
-          .map((o) => ({
-            key: `category:${o.key}`,
-            label: o.label,
-            onRemove: () => toggleCategory(o.key),
-          }))
-      : []),
-  ];
+  }, [groupSections, uncheckedGroups, groupCache, userId]);
 
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="h-full w-full" />
 
       {!loading && !error && (
-        <div className="absolute inset-x-0 top-0 z-10 flex flex-col gap-2 bg-background/95 p-3 shadow-sm backdrop-blur dark:bg-background/90">
-          <div className="flex items-center gap-2">
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={activeTab === "owner" ? "소유 범위 검색" : "카테고리 검색"}
-              className="flex-1 rounded-md border border-black/10 px-3 py-1.5 text-sm outline-none dark:border-white/15"
-            />
-            <button
-              type="button"
-              onClick={() => setSidebarOpen(true)}
-              className="whitespace-nowrap rounded-md border border-black/10 px-3 py-1.5 text-sm dark:border-white/15"
-            >
-              팔로우
-            </button>
-          </div>
-
-          {(ownerScopeOptions.length > 0 || categoryOptions.length > 0) && (
-            <>
-              <div className="flex gap-1 border-b border-black/10 text-sm dark:border-white/15">
-                {(
-                  [
-                    ["owner", "소유 범위"],
-                    ["category", "카테고리"],
-                  ] as const
-                ).map(([tab, label]) => (
-                  <button
-                    key={tab}
-                    type="button"
-                    onClick={() => setActiveTab(tab)}
-                    className={`-mb-px border-b-2 px-3 py-1.5 ${
-                      activeTab === tab
-                        ? "border-foreground font-medium"
-                        : "border-transparent text-black/50 dark:text-white/50"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="flex flex-wrap gap-1.5">
-                {visibleOptions.map((o) => {
-                  const active =
-                    activeTab === "owner"
-                      ? effectiveOwnerScopes.has(o.key)
-                      : effectiveCategories.has(o.key);
-                  return (
-                    <button
-                      key={o.key}
-                      type="button"
-                      onClick={() =>
-                        activeTab === "owner" ? toggleOwnerScope(o.key) : toggleCategory(o.key)
-                      }
-                      className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-                        active
-                          ? "border-foreground bg-foreground text-background"
-                          : "border-black/15 text-black/60 dark:border-white/20 dark:text-white/60"
-                      }`}
-                    >
-                      {o.label}
-                    </button>
-                  );
-                })}
-                {visibleOptions.length === 0 && (
-                  <p className="text-xs text-black/40 dark:text-white/40">
-                    검색과 일치하는 항목이 없습니다.
-                  </p>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1.5 border-t border-black/10 pt-2 dark:border-white/15">
-                {chips.map((chip) => (
-                  <span
-                    key={chip.key}
-                    className="flex items-center gap-1 rounded-full bg-black/5 px-2.5 py-1 text-xs dark:bg-white/10"
-                  >
-                    {chip.label}
-                    <button
-                      type="button"
-                      onClick={chip.onRemove}
-                      aria-label={`${chip.label} 필터 제거`}
-                      className="text-black/40 hover:text-black/70 dark:text-white/40 dark:hover:text-white/70"
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-                {chips.length === 0 && (
-                  <span className="text-xs text-black/40 dark:text-white/40">전체 표시 중</span>
-                )}
-                <button
-                  type="button"
-                  onClick={clearFilter}
-                  className="ml-auto whitespace-nowrap rounded-md border border-black/10 px-2.5 py-1 text-xs text-black/60 dark:border-white/15 dark:text-white/60"
-                >
-                  초기화
-                </button>
-              </div>
-            </>
-          )}
-
-          <p className="text-xs text-black/40 dark:text-white/40">
-            💡 지도를 길게 누르거나 우클릭해서 등록
-          </p>
-        </div>
+        <p className="absolute left-3 top-3 z-10 rounded-md bg-background/90 px-3 py-1.5 text-xs text-black/40 shadow-sm backdrop-blur dark:bg-background/80 dark:text-white/40">
+          💡 지도를 길게 누르거나 우클릭해서 등록
+        </p>
       )}
 
       {loading && (
@@ -633,17 +581,12 @@ export default function KakaoMap() {
       <FollowSidebar
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
-        candidates={ownerScopeOptions
-          .filter((o) => o.key.startsWith("user:"))
-          .flatMap((owner) =>
-            categoryOptions
-              .filter((c) =>
-                spaces.some(
-                  (s) => ownerScopeKey(s, userId) === owner.key && s.category_id === c.key,
-                ),
-              )
-              .map((c) => ({ key: `${owner.key}:${c.key}`, label: `${owner.label}_${c.label}` })),
-          )}
+        onToggle={() => setSidebarOpen((v) => !v)}
+        hideToggle={modalOpen}
+        groupSections={groupSections}
+        uncheckedGroups={uncheckedGroups}
+        onToggleGroupChecked={toggleGroupChecked}
+        onSetGroupsChecked={setGroupsChecked}
       />
     </div>
   );

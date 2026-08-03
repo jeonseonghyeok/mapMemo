@@ -19,8 +19,18 @@
   }
 }
 
+/* 지도 위에서 옆으로 드래그하면 브라우저의 스와이프 뒤로/앞으로가기 제스처가 페이지
+   전체를 옆으로 밀어내는 문제가 있었다 — overflow-x만으로는 이 네비게이션 제스처를
+   막지 못해 overscroll-behavior-x로 원천 차단한다 */
+html {
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
 }

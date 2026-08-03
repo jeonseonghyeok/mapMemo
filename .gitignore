@@ -37,6 +37,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# playwright MCP test artifacts (screenshots/snapshots) — must not be watched by the dev server
+/.playwright-mcp/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

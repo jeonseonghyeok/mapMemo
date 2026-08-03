@@ -14,6 +14,7 @@ type CreateSpaceInput = {
   lng: number;
   name?: string;
   description?: string;
+  rating?: number;
   shared: boolean;
 };
 
@@ -32,6 +33,14 @@ export async function createSpace(input: CreateSpaceInput) {
     return {
       error: `이번 달 무료 등록 한도(${limit}건)를 초과했습니다. (현재 ${count}건 등록됨)`,
     };
+  }
+
+  // 평가는 1~5점, 0.5 단위 선택 입력 (details JSONB에 저장 — name/description과 동일한 패턴)
+  if (input.rating != null) {
+    const isValidRating = input.rating >= 1 && input.rating <= 5 && (input.rating * 2) % 1 === 0;
+    if (!isValidRating) {
+      return { error: "평가는 1~5점 사이의 0.5 단위 값이어야 합니다." };
+    }
   }
 
   // 공유 등록은 콘텐츠 필터를 통과해야 함 (PLANNING.md 3.2.2) — 카테고리가 아니라
@@ -54,6 +63,7 @@ export async function createSpace(input: CreateSpaceInput) {
     details: {
       ...(input.name ? { name: input.name } : {}),
       ...(input.description ? { description: input.description } : {}),
+      ...(input.rating != null ? { rating: input.rating } : {}),
     },
   });
 
